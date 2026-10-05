@@ -295,6 +295,14 @@
     font-weight:700; text-align:center; padding:calc(10px + env(safe-area-inset-top,0px)) 16px 10px;
     transform:translateY(-100%); transition:transform .25s cubic-bezier(.4,0,.2,1); }
   .save-error-banner.show { transform:translateY(0); }
+  [hidden] { display:none !important; }
+  .login { position:fixed; inset:0; z-index:100; background:var(--bg); display:flex; flex-direction:column; justify-content:center; padding:24px 22px calc(24px + env(safe-area-inset-bottom,0px)); overflow-y:auto; }
+  .login-card { width:100%; max-width:380px; margin:0 auto; }
+  .login h1 { font-size:36px; font-weight:700; letter-spacing:-.04em; margin:0 0 6px; }
+  .login .sub { color:var(--text-secondary); margin:0 0 30px; font-size:15px; }
+  .login .check { display:flex; align-items:center; gap:12px; min-height:48px; color:var(--text-secondary); font-size:14px; margin-bottom:6px; }
+  .login .check input { width:22px; height:22px; accent-color:var(--accent); margin:0; }
+  .login-err { color:var(--danger); font-size:13px; min-height:20px; margin:0 0 10px; }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation:none !important; transition:none !important; } }
   @media (max-width:360px) { .hero { flex-direction:column; align-items:flex-start; } .hero-ring { align-self:center; } }
 </style>
@@ -303,6 +311,24 @@
 <body>
 
   <div class="save-error-banner" id="saveErrorBanner">⚠️ Não foi possível salvar — esta alteração pode não persistir neste navegador.</div>
+
+<form class="login" id="loginScreen" autocomplete="on" hidden>
+  <div class="login-card">
+    <h1>HVTASK</h1>
+    <p class="sub">Entre com a sua conta pra ver as suas tarefas.</p>
+    <div class="field">
+      <div class="field-label">Login</div>
+      <input class="text-field" id="loginUser" type="email" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="seu@email.com" />
+    </div>
+    <div class="field">
+      <div class="field-label">Senha</div>
+      <input class="text-field" id="loginPass" type="password" name="password" autocomplete="current-password" placeholder="••••" />
+    </div>
+    <label class="check"><input type="checkbox" id="loginRemember" checked /> Manter conectado neste aparelho</label>
+    <div class="login-err" id="loginErr" role="alert"></div>
+    <button class="submit-btn" id="loginBtn" type="submit">Entrar</button>
+  </div>
+</form>
 
 <div class="app">
 
@@ -359,6 +385,7 @@
       <div id="idsListWrap"></div>
       <div class="group-label" style="margin-top:24px">backup</div>
       <button class="submit-btn" id="exportBtn">Exportar dados (.json)</button>
+      <button class="secondary-btn" id="logoutBtn">Sair da conta</button>
       <input type="file" id="importFile" accept="application/json" style="display:none;">
       <button class="secondary-btn" id="importBtn">Importar dados</button>
       <div class="hint-text" id="backupStatus" style="display:none;"></div>
@@ -519,7 +546,7 @@
   function shiftIso(iso, days) { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + days); return isoOf(d); }
 
   // ---------- armazenamento real (localStorage) ----------
-  const STORE_KEY = 'hvtask_data_v2';
+  let STORE_KEY = 'hvtask_data_v2';
   function loadStore() {
     try { const raw = localStorage.getItem(STORE_KEY); if (raw) return JSON.parse(raw); }
     catch (e) { console.warn('hvtask: falha ao ler dados salvos', e); }
@@ -539,17 +566,7 @@
     }
   }
 
-  let store = loadStore();
-  if (!store) {
-    const todayIso = isoOf(BASE);
-    store = {
-      tasks: [],
-      completions: {},  // "taskId|iso" -> true
-      reminders: [],    // {id, iso, name, time}
-      nextIdNum: 100
-    };
-    saveStore();
-  }
+  let store = { tasks: [], completions: {}, reminders: [], nextIdNum: 100 };
   function newId() { store.nextIdNum = (store.nextIdNum || 100) + 1; return 'x' + store.nextIdNum; }
 
   // ---------- tarefas & ocorrências ----------
@@ -1328,6 +1345,145 @@
     closeConfirmDelete();
   };
 
+
+  // ---------- conta e login ----------
+  // Este login só tranca a tela do aparelho. A senha não fica escrita no código (só um hash),
+  // mas um site sem servidor não protege contra quem sabe mexer no navegador.
+  const ACCOUNT_HASH = 'ee1307ef7cbd9e998e2bf1e137b7e50fcd58ab994542ee9e8ec89d6f19f3f2a3';
+  const SESSION_KEY = 'hvtask_session';
+  let loggedIn = false;
+
+  function sha256(str) {
+    const bytes = Array.from(new TextEncoder().encode(str));
+    const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+    const K = [], H = [];
+    let p = 0;
+    for (let c = 2; p < 64; c++) {
+      let prime = true;
+      for (let d = 2; d * d <= c; d++) if (c % d === 0) { prime = false; break; }
+      if (!prime) continue;
+      if (p < 8) H[p] = (Math.pow(c, 1 / 2) % 1 * 4294967296) | 0;
+      K[p++] = (Math.pow(c, 1 / 3) % 1 * 4294967296) | 0;
+    }
+    const bitLen = bytes.length * 8;
+    bytes.push(0x80);
+    while (bytes.length % 64 !== 56) bytes.push(0);
+    const hi = Math.floor(bitLen / 4294967296), lo = bitLen >>> 0;
+    for (let i = 3; i >= 0; i--) bytes.push((hi >>> (i * 8)) & 255);
+    for (let i = 3; i >= 0; i--) bytes.push((lo >>> (i * 8)) & 255);
+    for (let o = 0; o < bytes.length; o += 64) {
+      const w = new Array(64);
+      for (let i = 0; i < 16; i++) w[i] = (bytes[o + i * 4] << 24) | (bytes[o + i * 4 + 1] << 16) | (bytes[o + i * 4 + 2] << 8) | bytes[o + i * 4 + 3];
+      for (let i = 16; i < 64; i++) {
+        const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+      }
+      let [a, b, c, d, e, f, g, h] = H;
+      for (let i = 0; i < 64; i++) {
+        const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        const ch = (e & f) ^ (~e & g);
+        const t1 = (h + S1 + ch + K[i] + w[i]) | 0;
+        const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        const maj = (a & b) ^ (a & c) ^ (b & c);
+        const t2 = (S0 + maj) | 0;
+        h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      [a, b, c, d, e, f, g, h].forEach((v, i) => { H[i] = (H[i] + v) | 0; });
+    }
+    return H.map(x => (x >>> 0).toString(16).padStart(8, '0')).join('');
+  }
+
+  // Tarefas iniciais da conta (até 31/10/2026).
+  function buildSeedStore() {
+    const range = (a, b) => { const out = []; let c = a; while (c <= b) { out.push(c); c = shiftIso(c, 1); } return out; };
+    const tasks = []; let n = 0;
+    const add = (name, dates) => tasks.push({ id: 't' + (++n), name, type: 'mandatory', mode: 'dates', dates, time: null, createdAt: '2026-10-05', active: true });
+    const daily = range('2026-10-05', '2026-10-31');
+    add('💧 2,5 L', daily);
+    add('🚫 0 Refrigerante', daily);
+    add('🚫 0 Álcool', daily);
+    add('🚫 0 Doces e chocolates', daily);
+    add('📖 Ler 1 capítulo do livro', daily);
+    [['2026-10-06', '2026-10-11', 60, 3], ['2026-10-12', '2026-10-18', 70, 4], ['2026-10-19', '2026-10-25', 80, 5], ['2026-10-26', '2026-10-31', 100, 5]]
+      .forEach(([from, to, reps, min]) => {
+        const days = range(from, to);
+        add(`💪 ${reps} flexões`, days);
+        add(`💪 ${min}min de prancha`, days);
+      });
+    [['2026-10-08', 8], ['2026-10-11', 8], ['2026-10-15', 10], ['2026-10-19', 10], ['2026-10-22', 12], ['2026-10-26', 12], ['2026-10-31', 15]]
+      .forEach(([d, km]) => add(`🏃‍♀️‍➡️ ${km}Km`, [d]));
+    return { tasks, completions: {}, reminders: [], nextIdNum: 100 };
+  }
+
+  // Acréscimos à lista inicial. Rodam uma vez por conta, inclusive em aparelhos que já tinham as tarefas.
+  function applySeedPatches(st) {
+    st.patches = st.patches || [];
+    let changed = false;
+    if (!st.patches.includes('esteira')) {
+      const nums = st.tasks.map(t => /^t(\d+)$/.exec(t.id)).filter(Boolean).map(m => +m[1]);
+      const dates = [];
+      for (let c = '2026-10-05'; c <= '2026-10-31'; c = shiftIso(c, 1)) {
+        if ([1, 2, 3, 5, 6].includes(new Date(c + 'T00:00:00').getDay())) dates.push(c);
+      }
+      st.tasks.push({ id: 't' + (Math.max(0, ...nums) + 1), name: '🏃‍♀️‍➡️ 15min de esteira', type: 'mandatory', mode: 'dates', dates, time: null, createdAt: '2026-10-05', active: true });
+      st.patches.push('esteira');
+      changed = true;
+    }
+    return changed;
+  }
+
+  function startApp() {
+    loggedIn = true;
+    STORE_KEY = 'hvtask_data_v2_' + ACCOUNT_HASH.slice(0, 12);
+    store = loadStore();
+    if (!store) { store = buildSeedStore(); saveStore(); }
+    if (applySeedPatches(store)) saveStore();
+    document.getElementById('loginScreen').hidden = true;
+    render();
+    renderCal2Grid();
+    renderCalDayPanel(selectedCalOffset);
+    renderProgress();
+  }
+
+  function rememberSession(persist) {
+    try { localStorage.removeItem(SESSION_KEY); sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+    try { (persist ? localStorage : sessionStorage).setItem(SESSION_KEY, ACCOUNT_HASH); } catch (e) {}
+  }
+  function hasSession() {
+    try { return localStorage.getItem(SESSION_KEY) === ACCOUNT_HASH || sessionStorage.getItem(SESSION_KEY) === ACCOUNT_HASH; }
+    catch (e) { return false; }
+  }
+
+  let loginFails = 0, lockedUntil = 0;
+  document.getElementById('loginScreen').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const err = document.getElementById('loginErr');
+    const wait = Math.ceil((lockedUntil - Date.now()) / 1000);
+    if (wait > 0) { err.textContent = `Muitas tentativas. Tente de novo em ${wait}s.`; return; }
+    const user = document.getElementById('loginUser').value.trim().toLowerCase();
+    const pass = document.getElementById('loginPass').value;
+    if (sha256(user + '|' + pass + '|hvtask') === ACCOUNT_HASH) {
+      loginFails = 0; err.textContent = '';
+      rememberSession(document.getElementById('loginRemember').checked);
+      document.getElementById('loginPass').value = '';
+      startApp();
+    } else {
+      loginFails++;
+      if (loginFails >= 5) { lockedUntil = Date.now() + 30000; loginFails = 0; err.textContent = 'Muitas tentativas. Tente de novo em 30s.'; }
+      else err.textContent = 'Login ou senha incorretos.';
+      document.getElementById('loginPass').value = '';
+    }
+  });
+
+  document.getElementById('logoutBtn').addEventListener('click', () => {
+    try { localStorage.removeItem(SESSION_KEY); sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+    loggedIn = false;
+    store = { tasks: [], completions: {}, reminders: [], nextIdNum: 100 };
+    document.getElementById('loginErr').textContent = '';
+    document.getElementById('loginScreen').hidden = false;
+  });
+
   // ---- instalável / offline (service worker) ----
   // Funciona quando servido de verdade (https:// ou localhost). Dentro do preview do Claude
   // ou aberto como arquivo local (file://) isso falha silenciosamente, sem quebrar o app.
@@ -1337,6 +1493,7 @@
 
   // ---- virada do dia automática (app aberto passando da meia-noite) ----
   function advanceDayIfNeeded() {
+    if (!loggedIn) return;
     const now = new Date(); now.setHours(0, 0, 0, 0);
     if (isoOf(now) === isoOf(BASE)) return;
     const keepPrincipalDate = dateForOffset(offset);
@@ -1364,10 +1521,7 @@
   })();
   if (hintTaps() >= 5) document.getElementById('lpHint').style.display = 'none';
 
-  render();
-  renderCal2Grid();
-  renderCalDayPanel(0);
-  renderProgress();
+  if (hasSession()) startApp(); else document.getElementById('loginScreen').hidden = false;
 </script>
 
 </body>
